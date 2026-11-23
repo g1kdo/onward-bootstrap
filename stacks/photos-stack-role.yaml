@@ -1,0 +1,159 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Onward Logistics - Bootstrap (eu-west-1): role used by GitSync and CloudFormation to deploy the photos root stack'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+
+Resources:
+  PhotosStackRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'onward-${Environment}-photos-stack-role'
+      Path: /service-role/ # keeps it outside the onward-dev-photos-* roles it is allowed to manage
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [cloudformation.sync.codeconnections.amazonaws.com, cloudformation.amazonaws.com]
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns: [!Ref GitSyncPolicy, !Ref PlatformPolicy, !Ref DataPolicy]
+
+  # ===========================================================================
+  # GITSYNC: read the repo, create change sets, pass this role to CloudFormation
+  # ===========================================================================
+  GitSyncPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: 'GitSync operations for the photos root stack'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SyncToCloudFormation
+            Effect: Allow
+            Action: ['cloudformation:*ChangeSet*', 'cloudformation:Describe*', 'cloudformation:GetTemplate*',
+                     'cloudformation:List*', 'cloudformation:ValidateTemplate', 'cloudformation:UpdateStack',
+                     'cloudformation:DeleteStack', 'cloudformation:CreateStack', 'cloudformation:TagResource']
+            Resource: '*'
+          - Sid: GitSyncManagedEventRules
+            Effect: Allow
+            Action: ['events:PutRule', 'events:PutTargets']
+            Resource: '*'
+            Condition:
+              StringEquals: {'events:ManagedBy': cloudformation.sync.codeconnections.amazonaws.com}
+          - Sid: DescribeEventRules
+            Effect: Allow
+            Action: 'events:DescribeRule'
+            Resource: '*'
+          - Sid: PassThisRoleToCloudFormation
+            Effect: Allow
+            Action: 'iam:PassRole'
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/onward-${Environment}-photos-stack-role'
+            Condition:
+              StringEquals: {'iam:PassedToService': cloudformation.amazonaws.com}
+          - Sid: ReadNestedTemplates
+            Effect: Allow
+            Action: 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::onward-${Environment}-bootstrap-templates-${AWS::AccountId}/photos/*'
+
+  # ===========================================================================
+  # PLATFORM: network, endpoints, load balancer, CDN, containers
+  # ===========================================================================
+  PlatformPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: 'Network, load balancing, CloudFront and ECS resources of the photos service'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: RegionalPlatformServices
+            Effect: Allow
+            Action: ['ec2:*Vpc*', 'ec2:*Subnet*', 'ec2:*InternetGateway*', 'ec2:*Route*', 'ec2:*SecurityGroup*',
+                     'ec2:Describe*', 'ec2:CreateTags', 'ec2:DeleteTags', 'elasticloadbalancing:*', 'ecs:*',
+                     'logs:*', 'application-autoscaling:*', 'cloudwatch:*Alarm*']
+            Resource: '*'
+            Condition:
+              StringEquals: {'aws:RequestedRegion': !Ref AWS::Region}
+          - Sid: PrivateDnsForInterfaceEndpoints
+            Effect: Allow
+            Action: ['route53:AssociateVPCWithHostedZone', 'route53:DisassociateVPCFromHostedZone']
+            Resource: '*'
+          - Sid: CloudFrontDistributionAndSigning
+            Effect: Allow
+            Action: ['cloudfront:*Distribution*', 'cloudfront:*OriginAccessControl*', 'cloudfront:*PublicKey*',
+                     'cloudfront:*KeyGroup*', 'cloudfront:Get*Policy', 'cloudfront:List*', 'cloudfront:TagResource',
+                     'cloudfront:UntagResource']
+            Resource: '*'
+          - Sid: CreateServiceLinkedRolesOnFirstUse
+            Effect: Allow
+            Action: 'iam:CreateServiceLinkedRole'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'iam:AWSServiceName': [ecs.amazonaws.com, ecs.application-autoscaling.amazonaws.com,
+                                       elasticloadbalancing.amazonaws.com, rds.amazonaws.com]
+
+  # ===========================================================================
+  # DATA AND IDENTITY: photo bucket, database, secrets, roles, nested stacks
+  # ===========================================================================
+  DataPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: 'S3, RDS, Secrets Manager, IAM roles and nested stacks of the photos service'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: NestedStacksOfTheRootStack
+            Effect: Allow
+            Action: 'cloudformation:*'
+            Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/onward-${Environment}-photos-root-stack*/*'
+          - Sid: PhotoBucket
+            Effect: Allow
+            Action: ['s3:CreateBucket', 's3:DeleteBucket', 's3:ListBucket', 's3:GetBucket*', 's3:PutBucket*',
+                     's3:DeleteBucketPolicy', 's3:GetEncryptionConfiguration', 's3:PutEncryptionConfiguration',
+                     's3:GetLifecycleConfiguration', 's3:PutLifecycleConfiguration', 's3:GetReplicationConfiguration',
+                     's3:PutReplicationConfiguration']
+            Resource: !Sub 'arn:aws:s3:::onward-${Environment}-photos-*'
+          - Sid: Database
+            Effect: Allow
+            Action: ['rds:*DBInstance*', 'rds:*DBSubnetGroup*', 'rds:CreateDBSnapshot', 'rds:DescribeDBSnapshots',
+                     'rds:AddTagsToResource', 'rds:RemoveTagsFromResource', 'rds:ListTagsForResource',
+                     'rds:DescribeDBEngineVersions', 'rds:DescribeOrderableDBInstanceOptions']
+            Resource: '*'
+            Condition:
+              StringEquals: {'aws:RequestedRegion': !Ref AWS::Region}
+          - Sid: SecretsCreatedByTheStackOrRds
+            Effect: Allow
+            Action: ['secretsmanager:CreateSecret', 'secretsmanager:DeleteSecret', 'secretsmanager:DescribeSecret',
+                     'secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue', 'secretsmanager:TagResource',
+                     'secretsmanager:RotateSecret', 'secretsmanager:GetRandomPassword']
+            Resource: '*'
+          - Sid: PhotosServiceRoles
+            Effect: Allow
+            Action: ['iam:CreateRole', 'iam:DeleteRole', 'iam:GetRole', 'iam:UpdateRole*', 'iam:TagRole', 'iam:UntagRole',
+                     'iam:AttachRolePolicy', 'iam:DetachRolePolicy', 'iam:ListAttachedRolePolicies',
+                     'iam:ListRolePolicies', 'iam:ListInstanceProfilesForRole']
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/onward-${Environment}-photos-*'
+          - Sid: DescribeDefaultSecretsKey
+            Effect: Allow
+            Action: 'kms:DescribeKey'
+            Resource: '*'
+          - Sid: PoliciesOwnedByTheRootStack
+            Effect: Allow
+            Action: ['iam:CreatePolicy', 'iam:DeletePolicy', 'iam:GetPolicy*', 'iam:ListPolicyVersions',
+                     'iam:CreatePolicyVersion', 'iam:DeletePolicyVersion', 'iam:ListEntitiesForPolicy', 'iam:TagPolicy']
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:policy/onward-${Environment}-photos-root-stack-*'
+          - Sid: PassPhotosRolesToTheirServices
+            Effect: Allow
+            Action: 'iam:PassRole'
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/onward-${Environment}-photos-*'
+            Condition:
+              StringEquals: {'iam:PassedToService': [ecs-tasks.amazonaws.com, s3.amazonaws.com]}
+
+Outputs:
+  PhotosStackRoleArn:
+    Description: 'Choose this role when creating the onward-dev-photos-root-stack GitSync stack'
+    Value: !GetAtt PhotosStackRole.Arn

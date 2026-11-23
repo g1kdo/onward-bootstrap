@@ -1,0 +1,7 @@
+template-file-path: stacks/photo-replica.yaml
+parameters:
+  Environment: dev
+tags:
+  Project: onward
+  Owner: Katy Great Adonaï
+  Environment: dev

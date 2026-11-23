@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Onward Logistics - Bootstrap (eu-central-1): replica bucket that keeps a copy of every delivery photo outside the primary Region'
+
+# Deployed in eu-central-1 (Frankfurt). It must exist before the photos storage stack in
+# eu-west-1, because S3 replication needs a versioned destination bucket.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+
+Resources:
+  ReplicaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'onward-${Environment}-photos-replica-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled # required for a replication destination
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+
+  # Only encrypted (TLS) requests are accepted
+  ReplicaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReplicaBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: [!GetAtt ReplicaBucket.Arn, !Sub '${ReplicaBucket.Arn}/*']
+            Condition:
+              Bool: {'aws:SecureTransport': 'false'}
+
+Outputs:
+  ReplicaBucketArn:
+    Value: !GetAtt ReplicaBucket.Arn

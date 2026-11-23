@@ -1,0 +1,141 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Onward Logistics - Bootstrap (eu-west-1): templates bucket, image registry and GitHub OIDC roles for the photos service'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+
+  # GitHub immutable OIDC subjects (gh api repos/<owner>/<repo>/actions/oidc/customization/sub)
+  InfraRepoSubject:
+    Type: String
+    Description: OIDC subject prefix of the infrastructure repository.
+  AppRepoSubject:
+    Type: String
+    Description: OIDC subject prefix of the photos application repository.
+
+Resources:
+  # ===========================================================================
+  # NESTED TEMPLATES BUCKET (written by the infra repo workflow, read by CloudFormation)
+  # ===========================================================================
+  TemplatesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'onward-${Environment}-bootstrap-templates-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+
+  # ===========================================================================
+  # IMAGE REGISTRY (must exist before the first release, so it lives here)
+  # ===========================================================================
+  PhotosAppRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub 'onward-${Environment}-photos-app'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules": [{"rulePriority": 1, "description": "Keep the last 10 images",
+            "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10},
+            "action": {"type": "expire"}}]}
+
+  # ===========================================================================
+  # GITHUB ACTIONS ROLES (short-lived OIDC credentials, main branch only)
+  # ===========================================================================
+  InfraPublisherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'onward-${Environment}-photos-infra-publisher-role'
+      Description: 'Lets the infra repo workflow validate and upload the photos nested templates'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+                'token.actions.githubusercontent.com:sub': !Sub '${InfraRepoSubject}:ref:refs/heads/main'
+      ManagedPolicyArns: [!Ref InfraPublisherPolicy]
+
+  InfraPublisherPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: 'Upload photos templates and validate them'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: UploadPhotosTemplatesOnly
+            Effect: Allow
+            Action: 's3:PutObject'
+            Resource: !Sub '${TemplatesBucket.Arn}/photos/*'
+          - Sid: ValidateTemplates
+            Effect: Allow
+            Action: 'cloudformation:ValidateTemplate'
+            Resource: '*'
+
+  AppReleaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'onward-${Environment}-photos-app-release-role'
+      Description: 'Lets the app repo workflow push images and roll the ECS service'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+                'token.actions.githubusercontent.com:sub': !Sub '${AppRepoSubject}:ref:refs/heads/main'
+      ManagedPolicyArns: [!Ref AppReleasePolicy]
+
+  AppReleasePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: 'Push to the photos repository and start a new ECS deployment'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LogInToEcr
+            Effect: Allow
+            Action: 'ecr:GetAuthorizationToken'
+            Resource: '*'
+          - Sid: PushToPhotosRepositoryOnly
+            Effect: Allow
+            Action:
+              - 'ecr:BatchCheckLayerAvailability'
+              - 'ecr:InitiateLayerUpload'
+              - 'ecr:UploadLayerPart'
+              - 'ecr:CompleteLayerUpload'
+              - 'ecr:PutImage'
+              - 'ecr:BatchGetImage'
+            Resource: !GetAtt PhotosAppRepository.Arn
+          - Sid: RollPhotosServiceOnly
+            Effect: Allow
+            Action: ['ecs:UpdateService', 'ecs:DescribeServices']
+            Resource: !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/onward-${Environment}-photos-cluster/onward-${Environment}-photos-service'
+
+Outputs:
+  TemplatesBucketName:
+    Value: !Ref TemplatesBucket
+  PhotosAppRepositoryUri:
+    Value: !GetAtt PhotosAppRepository.RepositoryUri
+  InfraPublisherRoleArn:
+    Description: 'Store as GitHub secret PHOTOS_TEMPLATES_ROLE_ARN in onward-repo-infra'
+    Value: !GetAtt InfraPublisherRole.Arn
+  AppReleaseRoleArn:
+    Description: 'Store as GitHub secret AWS_ROLE_ARN in onward-photos-app'
+    Value: !GetAtt AppReleaseRole.Arn

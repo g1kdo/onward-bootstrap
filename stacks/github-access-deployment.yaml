@@ -1,0 +1,10 @@
+template-file-path: stacks/github-access.yaml
+parameters:
+  Environment: dev
+  InfraRepoSubject: repo:g1kdo@185706281/onward-repo-infra@1422250298
+  # Replace after creating onward-photos-app: gh api repos/g1kdo/onward-photos-app/actions/oidc/customization/sub
+  AppRepoSubject: repo:g1kdo@185706281/onward-photos-app@REPLACE_WITH_REPO_ID
+tags:
+  Project: onward
+  Owner: Katy Great Adonaï
+  Environment: dev
